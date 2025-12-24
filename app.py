@@ -48,23 +48,26 @@ def is_admin(phone, data):
 
 def create_teams(players):
     """
-    Create teams dynamically based on player count
-    Teams of 6-7 players each, randomly shuffled
+    Create teams of exactly 6 players each
+    Remainder players go into a new team
+    Examples:
+      8 players  -> Team 1: 6, Team 2: 2
+      13 players -> Team 1: 6, Team 2: 6, Team 3: 1
+      18 players -> Team 1: 6, Team 2: 6, Team 3: 6
     """
     num_players = len(players)
     if num_players == 0:
         return []
     
-    # Calculate number of teams
-    num_teams = max(1, (num_players + PLAYERS_PER_TEAM - 1) // PLAYERS_PER_TEAM)
-    
     # Random shuffle
     shuffled = players.copy()
     random.shuffle(shuffled)
-    teams = [[] for _ in range(num_teams)]
     
-    for i, player in enumerate(shuffled):
-        teams[i % num_teams].append(player)
+    # Create teams of exactly 6, remainder goes to last team
+    teams = []
+    for i in range(0, num_players, PLAYERS_PER_TEAM):
+        team = shuffled[i:i+PLAYERS_PER_TEAM]
+        teams.append(team)
     
     return teams
 
