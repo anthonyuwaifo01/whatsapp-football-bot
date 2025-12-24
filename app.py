@@ -1,0 +1,315 @@
+from flask import Flask, request
+from twilio.twiml.messaging_response import MessagingResponse
+import json
+import random
+import os
+from datetime import datetime
+
+app = Flask(__name__)
+
+# Configuration
+DATA_FILE = "players.json"
+PLAYERS_PER_TEAM = 6
+
+# Initialize data structure
+def init_data():
+    """Initialize default data structure"""
+    return {
+        "admins": [],  # List of admin phone numbers
+        "players": {},  # {phone: {name, skill}}
+        "session": {
+            "active": False,
+            "participants": [],  # List of phones who said "in"
+            "mode": None  # "random" or "skill"
+        }
+    }
+
+def load_data():
+    """Load data with error handling"""
+    try:
+        if os.path.exists(DATA_FILE):
+            with open(DATA_FILE, "r") as f:
+                return json.load(f)
+        else:
+            return init_data()
+    except Exception as e:
+        print(f"Error loading data: {e}")
+        return init_data()
+
+def save_data(data):
+    """Save data with error handling"""
+    try:
+        with open(DATA_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"Error saving data: {e}")
+
+def is_admin(phone, data):
+    """Check if user is admin"""
+    return phone in data.get("admins", [])
+
+def create_teams(players, mode="random"):
+    """
+    Create teams dynamically based on player count
+    Teams of 6-7 players each
+    """
+    num_players = len(players)
+    if num_players == 0:
+        return []
+    
+    # Calculate number of teams
+    num_teams = max(1, (num_players + PLAYERS_PER_TEAM - 1) // PLAYERS_PER_TEAM)
+    
+    if mode == "skill":
+        # Sort by skill descending
+        sorted_players = sorted(players, key=lambda x: x["skill"], reverse=True)
+        teams = [[] for _ in range(num_teams)]
+        
+        # Distribute top players across teams first (round-robin)
+        for i, player in enumerate(sorted_players):
+            teams[i % num_teams].append(player)
+    else:
+        # Random shuffle
+        shuffled = players.copy()
+        random.shuffle(shuffled)
+        teams = [[] for _ in range(num_teams)]
+        
+        for i, player in enumerate(shuffled):
+            teams[i % num_teams].append(player)
+    
+    return teams
+
+def format_teams(teams):
+    """Format teams for WhatsApp message"""
+    team_emojis = ["🔴", "🔵", "🟢", "🟡", "🟣", "🟠", "⚫", "⚪"]
+    team_names = ["Red", "Blue", "Green", "Yellow", "Purple", "Orange", "Black", "White"]
+    
+    text = "⚽ *THIS WEEK'S TEAMS* ⚽\n"
+    text += "=" * 30 + "\n\n"
+    
+    for i, team in enumerate(teams):
+        if not team:  # Skip empty teams
+            continue
+            
+        emoji = team_emojis[i % len(team_emojis)]
+        name = team_names[i % len(team_names)]
+        avg_skill = sum(p["skill"] for p in team) / len(team) if team else 0
+        
+        text += f"{emoji} *{name} Team* ({len(team)} players)\n"
+        text += f"Avg Skill: {'⭐' * int(avg_skill)}\n"
+        
+        for p in team:
+            text += f"  • {p['name']} {'⭐' * p['skill']}\n"
+        text += "\n"
+    
+    return text
+
+@app.route("/whatsapp", methods=["POST"])
+def whatsapp_bot():
+    """Main webhook handler"""
+    msg_body = request.values.get("Body", "").strip()
+    sender = request.values.get("From", "")
+    profile_name = request.values.get("ProfileName", "Player")
+    
+    # Load data
+    data = load_data()
+    
+    # Initialize response
+    response = MessagingResponse()
+    reply = response.message()
+    
+    # Normalize command
+    msg = msg_body.lower()
+    
+    # === ADMIN COMMANDS ===
+    
+    if msg.startswith("/addadmin"):
+        if not is_admin(sender, data) and len(data["admins"]) == 0:
+            # First user becomes admin
+            data["admins"].append(sender)
+            save_data(data)
+            reply.body("👑 You are now an admin!")
+        elif is_admin(sender, data):
+            reply.body("✅ You're already an admin!\n\nAdmin commands:\n"
+                      "/start - Start selection\n"
+                      "/end random - Random teams\n"
+                      "/end skill - Skill-balanced teams\n"
+                      "/setskill @name 1-5\n"
+                      "/status - View current status\n"
+                      "/reset - Reset session")
+        else:
+            reply.body("❌ Only existing admins can add new admins")
+    
+    elif msg == "/start":
+        if not is_admin(sender, data):
+            reply.body("❌ Only admins can start selection")
+        else:
+            data["session"]["active"] = True
+            data["session"]["participants"] = []
+            save_data(data)
+            reply.body("🎮 *TEAM SELECTION STARTED!*\n\n"
+                      "Reply with:\n"
+                      "• *in* - Join this week\n"
+                      "• *out* - Skip this week\n\n"
+                      "Admin will announce teams later!")
+    
+    elif msg.startswith("/end"):
+        if not is_admin(sender, data):
+            reply.body("❌ Only admins can end selection")
+        elif not data["session"]["active"]:
+            reply.body("❌ No active session. Use /start first")
+        else:
+            # Determine mode
+            mode = "random"
+            if "skill" in msg:
+                mode = "skill"
+            
+            # Get participating players
+            participants = data["session"]["participants"]
+            if not participants:
+                reply.body("❌ No players have joined yet!")
+            else:
+                # Build player list with names and skills
+                player_list = []
+                for phone in participants:
+                    player_info = data["players"].get(phone, {
+                        "name": "Unknown",
+                        "skill": 3
+                    })
+                    player_list.append(player_info)
+                
+                # Create teams
+                teams = create_teams(player_list, mode)
+                
+                # Format and send
+                mode_text = "🎲 RANDOM" if mode == "random" else "⚡ SKILL-BALANCED"
+                result = f"*{mode_text} SELECTION*\n\n{format_teams(teams)}"
+                result += f"Total Players: {len(player_list)}\n"
+                result += f"Teams Created: {len(teams)}"
+                
+                reply.body(result)
+                
+                # End session
+                data["session"]["active"] = False
+                save_data(data)
+    
+    elif msg.startswith("/setskill"):
+        if not is_admin(sender, data):
+            reply.body("❌ Only admins can set player skills")
+        else:
+            try:
+                # Parse: /setskill John 4
+                parts = msg_body.split()
+                if len(parts) < 3:
+                    reply.body("Usage: /setskill PlayerName 1-5")
+                else:
+                    player_name = parts[1]
+                    skill = int(parts[2])
+                    skill = max(1, min(5, skill))
+                    
+                    # Find player by name
+                    found = False
+                    for phone, info in data["players"].items():
+                        if info["name"].lower() == player_name.lower():
+                            data["players"][phone]["skill"] = skill
+                            found = True
+                            save_data(data)
+                            reply.body(f"✅ {info['name']}'s skill set to {'⭐' * skill}")
+                            break
+                    
+                    if not found:
+                        reply.body(f"❌ Player '{player_name}' not found")
+            except:
+                reply.body("Usage: /setskill PlayerName 1-5")
+    
+    elif msg == "/status":
+        if not is_admin(sender, data):
+            reply.body("❌ Admin only command")
+        else:
+            session = data["session"]
+            status = "🟢 ACTIVE" if session["active"] else "🔴 INACTIVE"
+            participant_count = len(session["participants"])
+            
+            status_msg = f"📊 *SESSION STATUS*\n\n"
+            status_msg += f"Status: {status}\n"
+            status_msg += f"Players In: {participant_count}\n\n"
+            
+            if participant_count > 0:
+                status_msg += "Participants:\n"
+                for phone in session["participants"]:
+                    player = data["players"].get(phone, {"name": "Unknown", "skill": 3})
+                    status_msg += f"  • {player['name']} {'⭐' * player['skill']}\n"
+            
+            reply.body(status_msg)
+    
+    elif msg == "/reset":
+        if not is_admin(sender, data):
+            reply.body("❌ Only admins can reset")
+        else:
+            data["session"]["active"] = False
+            data["session"]["participants"] = []
+            save_data(data)
+            reply.body("🔄 Session reset. Use /start to begin new selection")
+    
+    # === PLAYER COMMANDS ===
+    
+    elif msg == "in":
+        if not data["session"]["active"]:
+            reply.body("❌ No active selection. Wait for admin to /start")
+        else:
+            # Add to players if new
+            if sender not in data["players"]:
+                data["players"][sender] = {
+                    "name": profile_name,
+                    "skill": 3
+                }
+            
+            # Add to participants
+            if sender not in data["session"]["participants"]:
+                data["session"]["participants"].append(sender)
+                save_data(data)
+                reply.body(f"✅ {data['players'][sender]['name']} is IN!\n"
+                          f"Current count: {len(data['session']['participants'])} players")
+            else:
+                reply.body(f"ℹ️ You're already in, {data['players'][sender]['name']}!")
+    
+    elif msg == "out":
+        if not data["session"]["active"]:
+            reply.body("❌ No active selection")
+        else:
+            if sender in data["session"]["participants"]:
+                data["session"]["participants"].remove(sender)
+                save_data(data)
+                player_name = data["players"].get(sender, {}).get("name", profile_name)
+                reply.body(f"❌ {player_name} is OUT\n"
+                          f"Current count: {len(data['session']['participants'])} players")
+            else:
+                reply.body("ℹ️ You weren't in the list")
+    
+    elif msg == "/help":
+        help_text = "⚽ *FOOTBALL BOT COMMANDS*\n\n"
+        help_text += "*Everyone:*\n"
+        help_text += "• in - Join this week\n"
+        help_text += "• out - Skip this week\n\n"
+        
+        if is_admin(sender, data):
+            help_text += "*Admin Only:*\n"
+            help_text += "• /start - Start selection\n"
+            help_text += "• /end random - Random teams\n"
+            help_text += "• /end skill - Balanced teams\n"
+            help_text += "• /setskill Name 1-5\n"
+            help_text += "• /status - View status\n"
+            help_text += "• /reset - Reset session"
+        
+        reply.body(help_text)
+    
+    else:
+        # Unknown command
+        if msg.startswith("/"):
+            reply.body("❓ Unknown command. Send /help for commands")
+    
+    return str(response)
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
