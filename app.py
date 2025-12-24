@@ -3,7 +3,6 @@ from twilio.twiml.messaging_response import MessagingResponse
 import json
 import random
 import os
-from datetime import datetime
 
 app = Flask(__name__)
 
@@ -16,11 +15,10 @@ def init_data():
     """Initialize default data structure"""
     return {
         "admins": [],  # List of admin phone numbers
-        "players": {},  # {phone: {name, skill}}
+        "players": {},  # {phone: {name}}
         "session": {
             "active": False,
-            "participants": [],  # List of phones who said "in"
-            "mode": None  # "random" or "skill"
+            "participants": []  # List of phones who said "in"
         }
     }
 
@@ -48,10 +46,10 @@ def is_admin(phone, data):
     """Check if user is admin"""
     return phone in data.get("admins", [])
 
-def create_teams(players, mode="random"):
+def create_teams(players):
     """
     Create teams dynamically based on player count
-    Teams of 6-7 players each
+    Teams of 6-7 players each, randomly shuffled
     """
     num_players = len(players)
     if num_players == 0:
@@ -60,22 +58,13 @@ def create_teams(players, mode="random"):
     # Calculate number of teams
     num_teams = max(1, (num_players + PLAYERS_PER_TEAM - 1) // PLAYERS_PER_TEAM)
     
-    if mode == "skill":
-        # Sort by skill descending
-        sorted_players = sorted(players, key=lambda x: x["skill"], reverse=True)
-        teams = [[] for _ in range(num_teams)]
-        
-        # Distribute top players across teams first (round-robin)
-        for i, player in enumerate(sorted_players):
-            teams[i % num_teams].append(player)
-    else:
-        # Random shuffle
-        shuffled = players.copy()
-        random.shuffle(shuffled)
-        teams = [[] for _ in range(num_teams)]
-        
-        for i, player in enumerate(shuffled):
-            teams[i % num_teams].append(player)
+    # Random shuffle
+    shuffled = players.copy()
+    random.shuffle(shuffled)
+    teams = [[] for _ in range(num_teams)]
+    
+    for i, player in enumerate(shuffled):
+        teams[i % num_teams].append(player)
     
     return teams
 
@@ -93,13 +82,11 @@ def format_teams(teams):
             
         emoji = team_emojis[i % len(team_emojis)]
         name = team_names[i % len(team_names)]
-        avg_skill = sum(p["skill"] for p in team) / len(team) if team else 0
         
         text += f"{emoji} *{name} Team* ({len(team)} players)\n"
-        text += f"Avg Skill: {'⭐' * int(avg_skill)}\n"
         
         for p in team:
-            text += f"  • {p['name']} {'⭐' * p['skill']}\n"
+            text += f"  • {p['name']}\n"
         text += "\n"
     
     return text
@@ -132,9 +119,7 @@ def whatsapp_bot():
         elif is_admin(sender, data):
             reply.body("✅ You're already an admin!\n\nAdmin commands:\n"
                       "/start - Start selection\n"
-                      "/end random - Random teams\n"
-                      "/end skill - Skill-balanced teams\n"
-                      "/setskill @name 1-5\n"
+                      "/end - Create random teams\n"
                       "/status - View current status\n"
                       "/reset - Reset session")
         else:
@@ -153,37 +138,30 @@ def whatsapp_bot():
                       "• *out* - Skip this week\n\n"
                       "Admin will announce teams later!")
     
-    elif msg.startswith("/end"):
+    elif msg == "/end":
         if not is_admin(sender, data):
             reply.body("❌ Only admins can end selection")
         elif not data["session"]["active"]:
             reply.body("❌ No active session. Use /start first")
         else:
-            # Determine mode
-            mode = "random"
-            if "skill" in msg:
-                mode = "skill"
-            
             # Get participating players
             participants = data["session"]["participants"]
             if not participants:
                 reply.body("❌ No players have joined yet!")
             else:
-                # Build player list with names and skills
+                # Build player list with names
                 player_list = []
                 for phone in participants:
                     player_info = data["players"].get(phone, {
-                        "name": "Unknown",
-                        "skill": 3
+                        "name": "Unknown"
                     })
                     player_list.append(player_info)
                 
                 # Create teams
-                teams = create_teams(player_list, mode)
+                teams = create_teams(player_list)
                 
                 # Format and send
-                mode_text = "🎲 RANDOM" if mode == "random" else "⚡ SKILL-BALANCED"
-                result = f"*{mode_text} SELECTION*\n\n{format_teams(teams)}"
+                result = f"🎲 *RANDOM TEAM SELECTION*\n\n{format_teams(teams)}"
                 result += f"Total Players: {len(player_list)}\n"
                 result += f"Teams Created: {len(teams)}"
                 
@@ -192,35 +170,6 @@ def whatsapp_bot():
                 # End session
                 data["session"]["active"] = False
                 save_data(data)
-    
-    elif msg.startswith("/setskill"):
-        if not is_admin(sender, data):
-            reply.body("❌ Only admins can set player skills")
-        else:
-            try:
-                # Parse: /setskill John 4
-                parts = msg_body.split()
-                if len(parts) < 3:
-                    reply.body("Usage: /setskill PlayerName 1-5")
-                else:
-                    player_name = parts[1]
-                    skill = int(parts[2])
-                    skill = max(1, min(5, skill))
-                    
-                    # Find player by name
-                    found = False
-                    for phone, info in data["players"].items():
-                        if info["name"].lower() == player_name.lower():
-                            data["players"][phone]["skill"] = skill
-                            found = True
-                            save_data(data)
-                            reply.body(f"✅ {info['name']}'s skill set to {'⭐' * skill}")
-                            break
-                    
-                    if not found:
-                        reply.body(f"❌ Player '{player_name}' not found")
-            except:
-                reply.body("Usage: /setskill PlayerName 1-5")
     
     elif msg == "/status":
         if not is_admin(sender, data):
@@ -237,8 +186,8 @@ def whatsapp_bot():
             if participant_count > 0:
                 status_msg += "Participants:\n"
                 for phone in session["participants"]:
-                    player = data["players"].get(phone, {"name": "Unknown", "skill": 3})
-                    status_msg += f"  • {player['name']} {'⭐' * player['skill']}\n"
+                    player = data["players"].get(phone, {"name": "Unknown"})
+                    status_msg += f"  • {player['name']}\n"
             
             reply.body(status_msg)
     
@@ -260,8 +209,7 @@ def whatsapp_bot():
             # Add to players if new
             if sender not in data["players"]:
                 data["players"][sender] = {
-                    "name": profile_name,
-                    "skill": 3
+                    "name": profile_name
                 }
             
             # Add to participants
@@ -295,9 +243,7 @@ def whatsapp_bot():
         if is_admin(sender, data):
             help_text += "*Admin Only:*\n"
             help_text += "• /start - Start selection\n"
-            help_text += "• /end random - Random teams\n"
-            help_text += "• /end skill - Balanced teams\n"
-            help_text += "• /setskill Name 1-5\n"
+            help_text += "• /end - Create random teams\n"
             help_text += "• /status - View status\n"
             help_text += "• /reset - Reset session"
         
