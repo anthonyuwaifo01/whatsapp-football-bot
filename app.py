@@ -120,13 +120,62 @@ def whatsapp_bot():
             save_data(data)
             reply.body("👑 You are now an admin!")
         elif is_admin(sender, data):
-            reply.body("✅ You're already an admin!\n\nAdmin commands:\n"
-                      "/start - Start selection\n"
-                      "/end - Create random teams\n"
-                      "/status - View current status\n"
-                      "/reset - Reset session")
+            # Check if trying to add someone else
+            parts = msg_body.split()
+            if len(parts) > 1:
+                # Reply to a message to add that person as admin
+                reply.body("💡 To add someone as admin:\n\n"
+                          "1. Ask them to send any message\n"
+                          "2. Reply to their message with:\n"
+                          "   /makeadmin\n\n"
+                          "Current admins: " + str(len(data["admins"])))
+            else:
+                reply.body("✅ You're already an admin!\n\nAdmin commands:\n"
+                          "/start - Start selection\n"
+                          "/end - Create random teams\n"
+                          "/makeadmin - Reply to message to add admin\n"
+                          "/status - View current status\n"
+                          "/reset - Reset session")
         else:
             reply.body("❌ Only existing admins can add new admins")
+    
+    elif msg == "/makeadmin":
+        if not is_admin(sender, data):
+            reply.body("❌ Only admins can add other admins")
+        else:
+            # Check if this is a reply to another message
+            quoted_msg_from = request.values.get("WaId", None)
+            
+            # For groups, we need to extract the person being replied to
+            # Unfortunately Twilio doesn't provide this easily in sandbox
+            # So we'll use a simpler approach with phone number
+            reply.body("💡 Due to sandbox limitations, please manually add admin:\n\n"
+                      "Send: /addadmin +1234567890\n"
+                      "(Replace with their WhatsApp number)")
+    
+    elif msg.startswith("/addadmin +") or msg.startswith("/addadmin whatsapp:"):
+        if not is_admin(sender, data):
+            reply.body("❌ Only admins can add other admins")
+        else:
+            try:
+                # Extract phone number from message
+                parts = msg_body.split()
+                if len(parts) >= 2:
+                    new_admin = parts[1]
+                    # Format properly
+                    if not new_admin.startswith("whatsapp:"):
+                        new_admin = f"whatsapp:{new_admin.replace('+', '').replace(' ', '')}"
+                    
+                    if new_admin not in data["admins"]:
+                        data["admins"].append(new_admin)
+                        save_data(data)
+                        reply.body(f"✅ Added {new_admin} as admin!\n\nTotal admins: {len(data['admins'])}")
+                    else:
+                        reply.body("ℹ️ This person is already an admin")
+                else:
+                    reply.body("Usage: /addadmin +1234567890")
+            except Exception as e:
+                reply.body(f"❌ Error adding admin. Usage: /addadmin +1234567890")
     
     elif msg == "/start":
         if not is_admin(sender, data):
